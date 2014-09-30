@@ -31,11 +31,10 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
       if (relationship.options && relationship.options.polymorphic) {
         isPolymorphic = true;
       }
-
       if (!Ember.isNone(payload[key]) &&
           typeof(payload[key][0]) !== 'number' &&
             typeof(payload[key][0]) !== 'string' &&
-              relationship.kind ==='hasMany') {
+              relationship.kind === 'hasMany') {
         if (Ember.typeOf(payload[key]) === 'array' && payload[key].length > 0) {
           if(isPolymorphic) {
             // If there is a hasMany polymorphic relationship, push each
@@ -43,7 +42,7 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
             // be the same type
             forEach.call(payload[key],function(hash) {
               var type = this.typeForRoot(hash.type);
-              this.pushSinglePayload(store,type,hash);
+              this.pushSinglePayload(store, type, hash);
             }, this);
           } else {
             var ids = payload[key].mapBy('id'); //todo find pk (not always id)
@@ -52,7 +51,7 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
           }
         }
       }
-      else if (!Ember.isNone(payload[key]) && typeof(payload[key]) === 'object' && relationship.kind ==='belongsTo') {
+      else if (!Ember.isNone(payload[key]) && typeof(payload[key]) === 'object' && relationship.kind === 'belongsTo') {
         var type = relationship.type;
 
         if(isPolymorphic) {
@@ -60,11 +59,71 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
         }
 
         var id = payload[key].id;
-        this.pushSinglePayload(store,type,payload[key]);
+        this.pushSinglePayload(store, type, payload[key]);
 
-        if(!isPolymorphic) payload[key] = id;
+        if(!isPolymorphic) {
+          payload[key] = id;
+        }
       }
     }, this);
+  },
+
+  extractDjangoMetaPayload: function(payload) {
+    if(payload.count && payload.results) {
+      // this is a paginated result, compute pagination properties
+      var page_match = new RegExp('page=([0-9]+)');
+      var items = {
+        total: payload['count'],
+        first: 1,
+        last: payload['results'].length,
+        per_page: undefined,
+      };
+      var page = {
+        total: 1,
+        current: 1,
+        previous: false,
+        next: false,
+      };
+
+      // do we have a previous page?
+      if(res = page_match.exec(payload['previous'])) {
+        page.previous = parseInt(res[1], 10);
+        page.current = page.previous + 1;
+
+        // the number of items per page is calculated from number of
+        // items in previous pages and the number of the previous page
+        items.per_page = (payload['count'] - payload['results'].length) / page.previous;
+      }
+
+      // do we have a next page?
+      if(res = page_match.exec(payload['next'])) {
+        page.next = parseInt(res[1], 10);
+        page.current = page.next - 1;
+
+        // as we have a next page, we know that the current page is
+        // full, so just count how many items are in the current page
+        items.per_page = payload['results'].length;
+      }
+
+      if(items.per_page === undefined) {
+        // `items.per_page` is not set, this happen when there is only
+        // one page. And with only one page, we are not able to guess
+        // the server-side configured value for the number of items per
+        // page.
+      } else {
+        page.total = Math.ceil(payload['count'] / items.per_page);
+        items.first = (page.current - 1) * items.per_page + 1;
+        items.last = items.first + payload['results'].length - 1;
+      }
+
+      // add a pagination object in metadata
+      return {
+        page: page,
+        items: items,
+      };
+    } else {
+      return null;
+    }
   },
 
   extractSingle: function(store, type, payload) {
@@ -78,6 +137,9 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
 
   extractArray: function(store, type, payload) {
     var self = this;
+    if(!payload.length && payload.count && payload.results) {
+      payload = payload.results;
+    }
     for (var j = 0; j < payload.length; j++) {
       // using normalize from RESTSerializer applies transforms and allows
       // us to define keyForAttribute and keyForRelationship to handle
@@ -86,6 +148,16 @@ DS.DjangoRESTSerializer = DS.RESTSerializer.extend({
       self.extractDjangoPayload(store, type, payload[j]);
     }
     return payload;
+  },
+
+  extractMeta: function(store, type, payload) {
+    // extract count, next, prev, ... from paginated result
+    // pagination = funccall()
+    var pagination = this.extractDjangoMetaPayload(payload);
+    if (payload && pagination) {
+      store.metaForType(type, pagination);
+      delete pagination;
+    }
   },
 
   /**
